@@ -1,22 +1,61 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import pandas_ta as ta  # For Supertrend calculation
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
+# --- START OF PRE-IMPORT PATCH FOR PANDAS_TA / NUMPY (if needed) ---
+# This section attempts to fix a common ImportError in pandas_ta with newer numpy versions
+# by dynamically patching the problematic line in its source code.
+# Remove this section if pandas_ta works without it after library updates.
+try:
+    import sys
+    import os
+    import numpy as np # Import numpy early for the patch
+    if not hasattr(np, 'NaN'):
+        np.NaN = np.nan # Create an alias for np.nan as np.NaN
+        # print("Successfully patched numpy.NaN alias.") # Debug print, remove for clean app
+except Exception as e:
+    # print(f"Error during numpy.NaN pre-import patch: {e}") # Debug print
+    pass # Suppress error if patch fails but pandas_ta might still work
+# --- END OF PRE-IMPORT PATCH FOR PANDAS_TA / NUMPY ---
+
+import pandas_ta as ta # Import pandas_ta after potential patch
+
 # --- Streamlit App UI ---
-st.title("📈 Dual Supertrend Trading Strategy Backtester (15-min Primary)")
-st.markdown("Backtests a strategy using Supertrend on 15-minute and 60-minute timeframes for Gold Futures (GC=F).")
-st.markdown(
-    "Buy/Sell conditions: Current candle closes above/below 15m Supertrend AND current price is above/below 60m Supertrend.")
+st.title("📈 Dual Supertrend Trading Strategy Backtester")
+st.markdown("Backtests a strategy using Supertrend on two configurable timeframes for Gold Futures (GC=F).")
+st.markdown("Buy/Sell conditions: Current candle closes above/below Primary TF Supertrend AND current price is above/below Secondary TF Supertrend.")
 
 # --- Sidebar Configuration ---
 st.sidebar.header("Strategy Parameters")
 ticker = st.sidebar.text_input("Ticker Symbol", value="GC=F")
-period = st.sidebar.selectbox("Data Period", ["30d", "60d", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"],
-                              index=1)  # Default to 60d for enough data
+period = st.sidebar.selectbox("Data Period", ["30d", "60d", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"], index=1)
+
+# Dynamic Timeframe Selection
+st.sidebar.subheader("Timeframe Settings")
+primary_tf_str = st.sidebar.selectbox("Primary Timeframe", ["5m", "15m", "30m", "60m"], index=0) # Added more options
+# Map selected string to yfinance interval
+primary_interval_map = {
+    "5m": "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "60m": "60m"
+}
+primary_interval = primary_interval_map[primary_tf_str]
+
+# Determine secondary interval based on primary (e.g., 3x primary)
+secondary_interval_map = {
+    "5m": "15m",
+    "15m": "60m", # 45m is not directly supported by yfinance, use 60m
+    "30m": "90m", # 90m is supported
+    "60m": "1d"   # For 60m primary, 1d secondary
+}
+secondary_interval = secondary_interval_map[primary_tf_str]
+
+st.sidebar.write(f"Secondary Timeframe will be: **{secondary_interval}**")
+
 
 st.sidebar.subheader("Supertrend Settings (7, 3.0)")
 st_length = st.sidebar.number_input("Supertrend Length", value=7, min_value=1)
@@ -25,94 +64,100 @@ st_multiplier = st.sidebar.number_input("Supertrend Multiplier", value=3.0, min_
 st.sidebar.subheader("Risk Management")
 sl_points = st.sidebar.number_input("Stop Loss (points)", value=5.0, min_value=0.1, format="%.1f")
 tp_points = st.sidebar.number_input("Take Profit (points)", value=15.0, min_value=0.1, format="%.1f")
-lookahead_candles = st.sidebar.number_input("Lookahead Candles (15m)", value=10, min_value=1, max_value=100,
-                                            help="Number of 15-min candles to look for SL/TP hit after entry.")  # Adjusted default for 15m
+lookahead_candles = st.sidebar.number_input(f"Lookahead Candles ({primary_tf_str})", value=20, min_value=1, max_value=200, help=f"Number of {primary_tf_str} candles to look for SL/TP hit after entry.")
+
+# Number of trades to display
+st.sidebar.subheader("Display Options")
+num_trades_to_display = st.sidebar.number_input("Number of Last Trades to Display", value=30, min_value=1, max_value=500)
+
 
 # --- Step 1: Download Historical Data for both timeframes ---
 st.subheader("Data Download")
-st.info(f"Downloading {period} of 15-minute and 60-minute data for {ticker}...")
+st.info(f"Downloading {period} of {primary_interval} and {secondary_interval} data for {ticker}...")
 
-df_15m = pd.DataFrame()  # Primary dataframe (15-minute)
-df_60m = pd.DataFrame()  # Secondary dataframe (60-minute)
+df_primary = pd.DataFrame()
+df_secondary = pd.DataFrame()
 
 try:
-    # Download 15-minute data (Primary)
-    df_15m = yf.download(ticker, interval="15m", period=period, auto_adjust=False)
-    if df_15m.empty:
-        st.error(f"Error: No 15-minute data downloaded for {ticker}. Please check ticker/period.")
+    # Download Primary Timeframe Data
+    df_primary = yf.download(ticker, interval=primary_interval, period=period, auto_adjust=False)
+    if df_primary.empty:
+        st.error(f"Error: No {primary_interval} data downloaded for {ticker}. Please check ticker/period.")
+        st.stop()
+    
+    if isinstance(df_primary.columns, pd.MultiIndex):
+        df_primary.columns = df_primary.columns.droplevel(1)
+    df_primary.reset_index(inplace=True)
+    df_primary.rename(columns={'index': 'Datetime', 'Date': 'Datetime'}, inplace=True, errors='ignore')
+    df_primary['Datetime'] = pd.to_datetime(df_primary['Datetime'])
+    df_primary.set_index('Datetime', inplace=True)
+    df_primary.dropna(inplace=True)
+    st.success(f"Successfully downloaded {len(df_primary)} rows of {primary_interval} data.")
+
+    # Download Secondary Timeframe Data
+    df_secondary = yf.download(ticker, interval=secondary_interval, period=period, auto_adjust=False)
+    if df_secondary.empty:
+        st.error(f"Error: No {secondary_interval} data downloaded for {ticker}. Please check ticker/period.")
         st.stop()
 
-    if isinstance(df_15m.columns, pd.MultiIndex):
-        df_15m.columns = df_15m.columns.droplevel(1)
-    df_15m.reset_index(inplace=True)
-    df_15m.rename(columns={'index': 'Datetime', 'Date': 'Datetime'}, inplace=True, errors='ignore')
-    df_15m['Datetime'] = pd.to_datetime(df_15m['Datetime'])
-    df_15m.set_index('Datetime', inplace=True)
-    df_15m.dropna(inplace=True)
-    st.success(f"Successfully downloaded {len(df_15m)} rows of 15-minute data.")
-
-    # Download 60-minute data (Secondary)
-    df_60m = yf.download(ticker, interval="60m", period=period, auto_adjust=False)
-    if df_60m.empty:
-        st.error(f"Error: No 60-minute data downloaded for {ticker}. Please check ticker/period.")
-        st.stop()
-
-    if isinstance(df_60m.columns, pd.MultiIndex):
-        df_60m.columns = df_60m.columns.droplevel(1)
-    df_60m.reset_index(inplace=True)
-    df_60m.rename(columns={'index': 'Datetime', 'Date': 'Datetime'}, inplace=True, errors='ignore')
-    df_60m['Datetime'] = pd.to_datetime(df_60m['Datetime'])
-    df_60m.set_index('Datetime', inplace=True)
-    df_60m.dropna(inplace=True)
-    st.success(f"Successfully downloaded {len(df_60m)} rows of 60-minute data.")
+    if isinstance(df_secondary.columns, pd.MultiIndex):
+        df_secondary.columns = df_secondary.columns.droplevel(1)
+    df_secondary.reset_index(inplace=True)
+    df_secondary.rename(columns={'index': 'Datetime', 'Date': 'Datetime'}, inplace=True, errors='ignore')
+    df_secondary['Datetime'] = pd.to_datetime(df_secondary['Datetime'])
+    df_secondary.set_index('Datetime', inplace=True)
+    df_secondary.dropna(inplace=True)
+    st.success(f"Successfully downloaded {len(df_secondary)} rows of {secondary_interval} data.")
 
 except Exception as e:
-    st.error(
-        f"Failed to download data: {e}. Please check ticker, internet connection, or try a different period/interval.")
+    st.error(f"Failed to download data: {e}. Please check ticker, internet connection, or try a different period/interval.")
     st.stop()
 
 # Ensure OHLC columns are numeric
 for col in ['Open', 'High', 'Low', 'Close']:
-    df_15m[col] = pd.to_numeric(df_15m[col], errors='coerce')
-    df_60m[col] = pd.to_numeric(df_60m[col], errors='coerce')
-df_15m.dropna(inplace=True)
-df_60m.dropna(inplace=True)
+    df_primary[col] = pd.to_numeric(df_primary[col], errors='coerce')
+    df_secondary[col] = pd.to_numeric(df_secondary[col], errors='coerce')
+df_primary.dropna(inplace=True)
+df_secondary.dropna(inplace=True)
 
-if df_15m.empty or df_60m.empty:
+if df_primary.empty or df_secondary.empty:
     st.error("Error: DataFrames are empty after numeric conversion and NaN removal. Exiting.")
     st.stop()
 
 # --- Step 2: Compute Supertrend Indicator for both timeframes ---
 st.subheader("Supertrend Calculation")
 with st.spinner(f"Calculating Supertrend ({st_length},{st_multiplier}) for both timeframes..."):
-    # 15-minute Supertrend
-    st_15m_data = ta.supertrend(df_15m['High'], df_15m['Low'], df_15m['Close'], length=st_length,
-                                multiplier=st_multiplier)
-    if st_15m_data is None or st_15m_data.empty:
-        st.error("Error: 15-minute Supertrend calculation failed. Exiting.")
+    # Primary Timeframe Supertrend
+    st_primary_data = ta.supertrend(df_primary['High'], df_primary['Low'], df_primary['Close'], length=st_length, multiplier=st_multiplier)
+    if st_primary_data is None or st_primary_data.empty:
+        st.error(f"Error: {primary_interval} Supertrend calculation failed. Exiting.")
         st.stop()
-    df_15m[f'SUPERT_{st_length}_{st_multiplier}'] = st_15m_data[f'SUPERT_{st_length}_{st_multiplier}']
-    df_15m.dropna(subset=[f'SUPERT_{st_length}_{st_multiplier}'], inplace=True)
+    df_primary[f'SUPERT_{st_length}_{st_multiplier}'] = st_primary_data[f'SUPERT_{st_length}_{st_multiplier}']
+    df_primary.dropna(subset=[f'SUPERT_{st_length}_{st_multiplier}'], inplace=True)
 
-    # 60-minute Supertrend
-    st_60m_data = ta.supertrend(df_60m['High'], df_60m['Low'], df_60m['Close'], length=st_length,
-                                multiplier=st_multiplier)
-    if st_60m_data is None or st_60m_data.empty:
-        st.error("Error: 60-minute Supertrend calculation failed. Exiting.")
+    # Secondary Timeframe Supertrend
+    st_secondary_data = ta.supertrend(df_secondary['High'], df_secondary['Low'], df_secondary['Close'], length=st_length, multiplier=st_multiplier)
+    if st_secondary_data is None or st_secondary_data.empty:
+        st.error(f"Error: {secondary_interval} Supertrend calculation failed. Exiting.")
         st.stop()
-    df_60m[f'SUPERT_{st_length}_{st_multiplier}'] = st_60m_data[f'SUPERT_{st_length}_{st_multiplier}']
-    df_60m.dropna(subset=[f'SUPERT_{st_length}_{st_multiplier}'], inplace=True)
+    df_secondary[f'SUPERT_{st_length}_{st_multiplier}'] = st_secondary_data[f'SUPERT_{st_length}_{st_multiplier}']
+    df_secondary.dropna(subset=[f'SUPERT_{st_length}_{st_multiplier}'], inplace=True)
 st.success("Supertrend calculations complete.")
 
-# --- Step 3: Align 60-minute Supertrend to 15-minute timeframe ---
+# --- Step 3: Align Secondary Supertrend to Primary timeframe ---
 st.subheader("Data Alignment")
-with st.spinner("Aligning 60-minute Supertrend to 15-minute timeframe..."):
-    st_60m_resampled = df_60m[f'SUPERT_{st_length}_{st_multiplier}'].resample('15min').ffill()
-    df_15m = df_15m.merge(st_60m_resampled.rename(f'SUPERT_60m_{st_length}_{st_multiplier}'),
-                          left_index=True, right_index=True, how='inner')
-    df_15m.dropna(inplace=True)
+with st.spinner(f"Aligning {secondary_interval} Supertrend to {primary_interval} timeframe..."):
+    # Resample secondary Supertrend to primary frequency and forward fill
+    # Convert primary interval string to timedelta for resampling
+    primary_resample_freq = primary_interval.replace('m', 'min').replace('h', 'H')
+    
+    st_secondary_resampled = df_secondary[f'SUPERT_{st_length}_{st_multiplier}'].resample(primary_resample_freq).ffill()
+    
+    df_primary = df_primary.merge(st_secondary_resampled.rename(f'SUPERT_Secondary_{st_length}_{st_multiplier}'), 
+                                left_index=True, right_index=True, how='inner')
+    df_primary.dropna(inplace=True)
 
-    if df_15m.empty:
+    if df_primary.empty:
         st.error("Error: DataFrame became empty after aligning Supertrend data. Adjust period or check data integrity.")
         st.stop()
 st.success("Supertrend data aligned and prepared.")
@@ -120,42 +165,42 @@ st.success("Supertrend data aligned and prepared.")
 # --- Step 4: Generate Buy/Sell Signals and Backtest ---
 st.subheader("Backtesting Strategy")
 trades = []
-position = None  # 'Buy', 'Sell', or None
+position = None # 'Buy', 'Sell', or None
 entry_price = 0.0
 entry_time = None
 entry_direction = None
 
 with st.spinner("Running backtest simulation..."):
-    for i in range(len(df_15m)):  # Iterate over the 15-minute DataFrame
-        current_candle = df_15m.iloc[i]
-
+    for i in range(len(df_primary)): # Iterate over the primary timeframe DataFrame
+        current_candle = df_primary.iloc[i]
+        
         if pd.isna(current_candle['Close']) or \
-                pd.isna(current_candle[f'SUPERT_{st_length}_{st_multiplier}']) or \
-                pd.isna(current_candle[f'SUPERT_60m_{st_length}_{st_multiplier}']):  # Changed to 60m Supertrend
+           pd.isna(current_candle[f'SUPERT_{st_length}_{st_multiplier}']) or \
+           pd.isna(current_candle[f'SUPERT_Secondary_{st_length}_{st_multiplier}']):
             continue
 
-        close_15m = current_candle['Close']
-        supertrend_15m = current_candle[f'SUPERT_{st_length}_{st_multiplier}']
-        supertrend_60m = current_candle[f'SUPERT_60m_{st_length}_{st_multiplier}']  # Changed to 60m Supertrend
+        close_primary = current_candle['Close']
+        supertrend_primary = current_candle[f'SUPERT_{st_length}_{st_multiplier}']
+        supertrend_secondary = current_candle[f'SUPERT_Secondary_{st_length}_{st_multiplier}']
 
         # Buy Condition
-        buy_condition = (close_15m > supertrend_15m) and (close_15m > supertrend_60m)
-
+        buy_condition = (close_primary > supertrend_primary) and (close_primary > supertrend_secondary)
+        
         # Sell Condition
-        sell_condition = (close_15m < supertrend_15m) and (close_15m < supertrend_60m)
+        sell_condition = (close_primary < supertrend_primary) and (close_primary < supertrend_secondary)
 
-        if position is None:  # No open position, look for entry
+        if position is None: # No open position, look for entry
             if buy_condition:
                 position = 'Buy'
-                entry_price = close_15m
-                entry_time = current_candle.name  # Datetime index
+                entry_price = close_primary
+                entry_time = current_candle.name # Datetime index
                 entry_direction = 'Buy'
             elif sell_condition:
                 position = 'Sell'
-                entry_price = close_15m
-                entry_time = current_candle.name  # Datetime index
+                entry_price = close_primary
+                entry_time = current_candle.name # Datetime index
                 entry_direction = 'Sell'
-
+        
         # If a position is open, check for SL/TP or counter-signal
         # Skip exit check on the entry candle itself
         if position is not None and current_candle.name == entry_time:
@@ -169,10 +214,10 @@ with st.spinner("Running backtest simulation..."):
 
             # Look ahead for SL/TP hit in the next LOOKAHEAD_CANDLES
             # Ensure there are enough candles for the lookahead slice
-            if (i + 1 + lookahead_candles) > len(df_15m):  # Changed to df_15m
-                lookahead_for_exit_df = df_15m.iloc[i + 1:].copy()  # Slice till end if not enough candles
+            if (i + 1 + lookahead_candles) > len(df_primary):
+                lookahead_for_exit_df = df_primary.iloc[i + 1 :].copy() # Slice till end if not enough candles
             else:
-                lookahead_for_exit_df = df_15m.iloc[i + 1: i + 1 + lookahead_candles].copy()  # Changed to df_15m
+                lookahead_for_exit_df = df_primary.iloc[i + 1 : i + 1 + lookahead_candles].copy()
 
             # If no lookahead candles available, handle as a timeout at the very end of data
             if lookahead_for_exit_df.empty:
@@ -186,7 +231,7 @@ with st.spinner("Running backtest simulation..."):
                 if position == 'Buy':
                     sl_hit_price = entry_price - sl_points
                     tp_hit_price = entry_price + tp_points
-
+                    
                     if current_lookahead_low <= sl_hit_price:
                         exit_price = sl_hit_price
                         pnl = exit_price - entry_price
@@ -199,7 +244,7 @@ with st.spinner("Running backtest simulation..."):
                         exit_time = exit_row.name
                         trade_closed = True
                         break
-
+                
                 elif position == 'Sell':
                     sl_hit_price = entry_price + sl_points
                     tp_hit_price = entry_price - tp_points
@@ -216,7 +261,7 @@ with st.spinner("Running backtest simulation..."):
                         exit_time = exit_row.name
                         trade_closed = True
                         break
-
+            
             # If trade was closed within lookahead window by SL/TP
             if trade_closed:
                 trades.append({
@@ -228,13 +273,13 @@ with st.spinner("Running backtest simulation..."):
                     'PnL': round(pnl, 2),
                     'Result': 'Profit' if pnl > 0 else 'Loss'
                 })
-                position = None  # Reset position after closing trade
+                position = None # Reset position after closing trade
             else:
                 # If not closed by SL/TP within lookahead, check for counter-signal on current candle
                 # This is important to prevent holding positions indefinitely
                 if (position == 'Buy' and sell_condition) or \
-                        (position == 'Sell' and buy_condition):
-                    exit_price = close_15m  # Close at current candle's close due to counter-signal
+                   (position == 'Sell' and buy_condition):
+                    exit_price = close_primary # Close at current candle's close due to counter-signal
                     pnl = exit_price - entry_price if position == 'Buy' else entry_price - exit_price
                     exit_time = current_candle.name
                     trades.append({
@@ -246,13 +291,13 @@ with st.spinner("Running backtest simulation..."):
                         'PnL': round(pnl, 2),
                         'Result': 'Counter-Signal Exit'
                     })
-                    position = None  # Reset position after closing trade
-
+                    position = None # Reset position after closing trade
+                
                 # If still open after counter-signal check and end of loop, it's a timeout
                 # This handles the very last open position if no exit condition is met
-                elif i == len(df_15m) - 1:  # If this is the last candle in the dataframe
-                    exit_price = close_15m
-                    pnl = exit_price - entry_price if position == 'Buy' else entry_price - close_15m  # Use close_15m for final PnL calc
+                elif i == len(df_primary) - 1: # If this is the last candle in the dataframe
+                    exit_price = close_primary
+                    pnl = exit_price - entry_price if position == 'Buy' else entry_price - close_primary # Use close_primary for final PnL calc
                     exit_time = current_candle.name
                     trades.append({
                         'Entry Time': entry_time,
@@ -263,7 +308,7 @@ with st.spinner("Running backtest simulation..."):
                         'PnL': round(pnl, 2),
                         'Result': 'Timeout'
                     })
-                    position = None  # Reset position
+                    position = None # Reset position
 
 st.success("Backtest simulation complete.")
 
@@ -274,11 +319,11 @@ if trades_df.empty:
     st.warning("No trades were executed based on the defined strategy and parameters. Adjust parameters or data range.")
 else:
     st.subheader("Backtest Summary")
-
+    
     total_pnl = trades_df['PnL'].sum()
     profitable_trades = trades_df[trades_df['PnL'] > 0]
     losing_trades = trades_df[trades_df['PnL'] <= 0]
-
+    
     # Calculate win rate for Profit vs Loss trades only
     wins = len(trades_df[trades_df['Result'] == 'Profit'])
     losses = len(trades_df[trades_df['Result'] == 'Loss'])
@@ -293,8 +338,9 @@ else:
     st.write(f"Counter-Signal Exits: {len(trades_df[trades_df['Result'] == 'Counter-Signal Exit'])}")
     st.write(f"Timeout Trades: {len(trades_df[trades_df['Result'] == 'Timeout'])}")
 
-    st.subheader("Trade Log (Last 30 Trades)")
-    st.dataframe(trades_df.tail(30))
+    # --- Trade Log (Dynamic Number of Trades) ---
+    st.subheader(f"Trade Log (Last {num_trades_to_display} Trades)")
+    st.dataframe(trades_df.tail(num_trades_to_display))
 
     # --- CSV Export ---
     csv_export = trades_df.to_csv(index=False).encode('utf-8')
@@ -309,46 +355,42 @@ else:
     st.subheader("Trade Outcome Distribution")
     outcome_counts = trades_df['Result'].value_counts().reset_index()
     outcome_counts.columns = ['Outcome', 'Count']
-    fig_outcome_pie = px.pie(outcome_counts,
-                             values='Count',
-                             names='Outcome',
+    fig_outcome_pie = px.pie(outcome_counts, 
+                             values='Count', 
+                             names='Outcome', 
                              title="Distribution of Trade Outcomes",
-                             color_discrete_map={'Profit': 'green', 'Loss': 'red', 'Counter-Signal Exit': 'orange',
-                                                 'Timeout': 'blue'})
+                             color_discrete_map={'Profit':'green', 'Loss':'red', 'Counter-Signal Exit':'orange', 'Timeout':'blue'})
     st.plotly_chart(fig_outcome_pie, use_container_width=True)
 
     # --- Cumulative PnL Chart ---
     trades_df['Cumulative PnL'] = trades_df['PnL'].cumsum()
-    fig_cumulative_pnl = px.line(trades_df, x='Exit Time', y='Cumulative PnL',
+    fig_cumulative_pnl = px.line(trades_df, x='Exit Time', y='Cumulative PnL', 
                                  title="Cumulative PnL Over Time",
                                  labels={'Cumulative PnL': 'Cumulative PnL (points)'})
     st.plotly_chart(fig_cumulative_pnl, use_container_width=True)
 
     # --- Candlestick Chart with Supertrends ---
-    st.subheader("Gold Price Candlestick Chart with Supertrends")
+    st.subheader(f"Gold Price ({primary_interval} Candles with Supertrends)")
     fig_candlestick = go.Figure(data=[go.Candlestick(
-        x=df_15m.index,  # Use the Datetime index for x-axis
-        open=df_15m['Open'],
-        high=df_15m['High'],
-        low=df_15m['Low'],
-        close=df_15m['Close'],
-        name='15m Candles'  # Changed name
+        x=df_primary.index, # Use the Datetime index for x-axis
+        open=df_primary['Open'],
+        high=df_primary['High'],
+        low=df_primary['Low'],
+        close=df_primary['Close'],
+        name=f'{primary_interval} Candles'
     )])
-
-    # Add 15m Supertrend
-    fig_candlestick.add_trace(go.Scatter(x=df_15m.index, y=df_15m[f'SUPERT_{st_length}_{st_multiplier}'],
-                                         mode='lines', name=f'15m Supertrend ({st_length},{st_multiplier})',
-                                         # Changed name
+    
+    # Add Primary Supertrend
+    fig_candlestick.add_trace(go.Scatter(x=df_primary.index, y=df_primary[f'SUPERT_{st_length}_{st_multiplier}'], 
+                                         mode='lines', name=f'{primary_interval} Supertrend ({st_length},{st_multiplier})', 
                                          line=dict(color='blue', width=1.5)))
+    
+    # Add Secondary Supertrend (aligned to primary timeframe)
+    fig_candlestick.add_trace(go.Scatter(x=df_primary.index, y=df_primary[f'SUPERT_Secondary_{st_length}_{st_multiplier}'], 
+                                         mode='lines', name=f'{secondary_interval} Supertrend ({st_length},{st_multiplier})', 
+                                         line=dict(color='purple', width=1.5, dash='dot')))
 
-    # Add 60m Supertrend (aligned to 15m timeframe)
-    fig_candlestick.add_trace(
-        go.Scatter(x=df_15m.index, y=df_15m[f'SUPERT_60m_{st_length}_{st_multiplier}'],  # Changed to 60m Supertrend
-                   mode='lines', name=f'60m Supertrend ({st_length},{st_multiplier})',  # Changed name
-                   line=dict(color='purple', width=1.5, dash='dot')))
-
-    fig_candlestick.update_layout(xaxis_rangeslider_visible=False,
-                                  title="Gold Price (15-min Candles with Supertrends)")  # Changed title
+    fig_candlestick.update_layout(xaxis_rangeslider_visible=False, title=f"Gold Price ({primary_interval} Candles with Supertrends)")
     st.plotly_chart(fig_candlestick, use_container_width=True)
 
     # --- PnL Distribution ---
@@ -374,9 +416,8 @@ else:
 
         # Calculate Win Rate for each day
         daily_summary['Total_Win_Loss_Trades'] = daily_summary['Profitable_Trades'] + daily_summary['Losing_Trades']
-        daily_summary['Win_Rate (%)'] = (daily_summary['Profitable_Trades'] / daily_summary[
-            'Total_Win_Loss_Trades']) * 100
-        daily_summary['Win_Rate (%)'] = daily_summary['Win_Rate (%)'].fillna(0).round(2)  # Handle division by zero
+        daily_summary['Win_Rate (%)'] = (daily_summary['Profitable_Trades'] / daily_summary['Total_Win_Loss_Trades']) * 100
+        daily_summary['Win_Rate (%)'] = daily_summary['Win_Rate (%)'].fillna(0).round(2) # Handle division by zero
 
         # Order days of the week for consistent display
         ordered_days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
@@ -388,10 +429,12 @@ else:
 
         # Find day with highest win rate
         if not daily_summary.empty:
-            highest_win_rate_day = daily_summary.loc[daily_summary['Win_Rate (%)'].idxmax()]
-            st.info(
-                f"**Day with Highest Win Rate:** {highest_win_rate_day['DayOfWeek']} with {highest_win_rate_day['Win_Rate (%)']:.2f}%")
+            # Filter out days with 0 total_win_loss_trades to avoid idxmax on all zeros
+            highest_win_rate_day_df = daily_summary[daily_summary['Total_Win_Loss_Trades'] > 0]
+            if not highest_win_rate_day_df.empty:
+                highest_win_rate_day = highest_win_rate_day_df.loc[highest_win_rate_day_df['Win_Rate (%)'].idxmax()]
+                st.info(f"**Day with Highest Win Rate:** {highest_win_rate_day['DayOfWeek']} with {highest_win_rate_day['Win_Rate (%)']:.2f}%")
+            else:
+                st.info("No days with winning or losing trades to determine highest win rate.")
         else:
             st.info("No daily performance data to analyze.")
-    else:
-        st.info("No trades to analyze for daily performance.")
