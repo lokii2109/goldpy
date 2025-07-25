@@ -1,3 +1,46 @@
+import sys
+import os
+
+# --- START OF RUNTIME PATCH FOR PANDAS_TA ---
+# This section attempts to fix a common ImportError in pandas_ta with newer numpy versions
+# by dynamically patching the problematic line in its source code.
+try:
+    # Construct the expected path to the problematic file
+    # This path is based on the traceback you provided from Streamlit Cloud
+    # /home/adminuser/venv/lib/python3.11/site-packages/pandas_ta/momentum/squeeze_pro.py
+    pandas_ta_path = None
+    for p in sys.path:
+        if "site-packages" in p and "venv" in p:
+            potential_path = os.path.join(p, 'pandas_ta', 'momentum', 'squeeze_pro.py')
+            if os.path.exists(potential_path):
+                pandas_ta_path = potential_path
+                break
+    
+    if pandas_ta_path:
+        with open(pandas_ta_path, 'r') as f:
+            lines = f.readlines()
+
+        modified = False
+        for i, line in enumerate(lines):
+            if "from numpy import NaN as npNaN" in line:
+                lines[i] = line.replace("from numpy import NaN as npNaN", "from numpy import nan as npNaN")
+                modified = True
+                break
+        
+        if modified:
+            with open(pandas_ta_path, 'w') as f:
+                f.writelines(lines)
+            print(f"Successfully patched {pandas_ta_path}")
+        else:
+            print(f"Patch not needed or line not found in {pandas_ta_path}")
+    else:
+        print("Could not locate squeeze_pro.py for patching.")
+
+except Exception as e:
+    print(f"Error during pandas_ta runtime patch: {e}")
+# --- END OF RUNTIME PATCH FOR PANDAS_TA ---
+
+
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -20,15 +63,12 @@ period = st.sidebar.selectbox("Data Period", ["30d", "60d", "3mo", "6mo", "1y", 
 
 st.sidebar.subheader("Supertrend Settings (7, 3.0)")
 st_length = st.sidebar.number_input("Supertrend Length", value=7,
-                                    min_value=1)  # This is fine as value and min_value are both ints
+                                    min_value=1)
 st_multiplier = st.sidebar.number_input("Supertrend Multiplier", value=3.0, min_value=0.1, format="%.1f")
 
 st.sidebar.subheader("Risk Management")
-# --- FIX for StreamlitMixedNumericTypesError ---
-# Change value to float (e.g., 5.0 instead of 5) to match min_value's float type
 sl_points = st.sidebar.number_input("Stop Loss (points)", value=5.0, min_value=0.1, format="%.1f")
 tp_points = st.sidebar.number_input("Take Profit (points)", value=15.0, min_value=0.1, format="%.1f")
-# --- END FIX ---
 lookahead_candles = st.sidebar.number_input("Lookahead Candles (5m)", value=20, min_value=1, max_value=200,
                                             help="Number of 5-min candles to look for SL/TP hit after entry.")
 
@@ -111,7 +151,7 @@ st.success("Supertrend calculations complete.")
 st.subheader("Data Alignment")
 with st.spinner("Aligning 15-minute Supertrend to 5-minute timeframe..."):
     st_15m_resampled = df_15m[f'SUPERT_{st_length}_{st_multiplier}'].resample('5min').ffill()
-    df_5m = df_5m.merge(st_15m_resampled.rename(f'SUPERT_15m_{st_length}_{st_multiplier}'),
+    df_5m = df_5m.merge(st_15m_resampled.rename(f'SUPERT_15m_{st_length}_{st_multiplier}'), 
                         left_index=True, right_index=True, how='inner')
     df_5m.dropna(inplace=True)
 
@@ -312,17 +352,16 @@ else:
     st.subheader("Trade Outcome Distribution")
     outcome_counts = trades_df['Result'].value_counts().reset_index()
     outcome_counts.columns = ['Outcome', 'Count']
-    fig_outcome_pie = px.pie(outcome_counts,
-                             values='Count',
-                             names='Outcome',
+    fig_outcome_pie = px.pie(outcome_counts, 
+                             values='Count', 
+                             names='Outcome', 
                              title="Distribution of Trade Outcomes",
-                             color_discrete_map={'Profit': 'green', 'Loss': 'red', 'Counter-Signal Exit': 'orange',
-                                                 'Timeout': 'blue'})
+                             color_discrete_map={'Profit':'green', 'Loss':'red', 'Counter-Signal Exit':'orange', 'Timeout':'blue'})
     st.plotly_chart(fig_outcome_pie, use_container_width=True)
 
     # --- Cumulative PnL Chart ---
     trades_df['Cumulative PnL'] = trades_df['PnL'].cumsum()
-    fig_cumulative_pnl = px.line(trades_df, x='Exit Time', y='Cumulative PnL',
+    fig_cumulative_pnl = px.line(trades_df, x='Exit Time', y='Cumulative PnL', 
                                  title="Cumulative PnL Over Time",
                                  labels={'Cumulative PnL': 'Cumulative PnL (points)'})
     st.plotly_chart(fig_cumulative_pnl, use_container_width=True)
@@ -330,22 +369,22 @@ else:
     # --- Candlestick Chart with Supertrends ---
     st.subheader("Gold Price Candlestick Chart with Supertrends")
     fig_candlestick = go.Figure(data=[go.Candlestick(
-        x=df_5m.index,  # Use the Datetime index for x-axis
+        x=df_5m.index, # Use the Datetime index for x-axis
         open=df_5m['Open'],
         high=df_5m['High'],
         low=df_5m['Low'],
         close=df_5m['Close'],
         name='5m Candles'
     )])
-
+    
     # Add 5m Supertrend
-    fig_candlestick.add_trace(go.Scatter(x=df_5m.index, y=df_5m[f'SUPERT_{st_length}_{st_multiplier}'],
-                                         mode='lines', name=f'5m Supertrend ({st_length},{st_multiplier})',
+    fig_candlestick.add_trace(go.Scatter(x=df_5m.index, y=df_5m[f'SUPERT_{st_length}_{st_multiplier}'], 
+                                         mode='lines', name=f'5m Supertrend ({st_length},{st_multiplier})', 
                                          line=dict(color='blue', width=1.5)))
-
+    
     # Add 15m Supertrend (aligned to 5m timeframe)
-    fig_candlestick.add_trace(go.Scatter(x=df_5m.index, y=df_5m[f'SUPERT_15m_{st_length}_{st_multiplier}'],
-                                         mode='lines', name=f'15m Supertrend ({st_length},{st_multiplier})',
+    fig_candlestick.add_trace(go.Scatter(x=df_5m.index, y=df_5m[f'SUPERT_15m_{st_length}_{st_multiplier}'], 
+                                         mode='lines', name=f'15m Supertrend ({st_length},{st_multiplier})', 
                                          line=dict(color='purple', width=1.5, dash='dot')))
 
     fig_candlestick.update_layout(xaxis_rangeslider_visible=False, title="Gold Price (5-min Candles with Supertrends)")
@@ -355,3 +394,44 @@ else:
     st.subheader("PnL Distribution")
     fig_pnl_hist = px.histogram(trades_df, x='PnL', nbins=20, title="Distribution of Trade PnL (points)")
     st.plotly_chart(fig_pnl_hist, use_container_width=True)
+
+    # --- Daily Performance Analysis ---
+    st.subheader("Daily Performance Analysis")
+    if not trades_df.empty:
+        # Ensure 'Exit Time' is datetime for day_name()
+        trades_df['Exit Time'] = pd.to_datetime(trades_df['Exit Time'])
+        trades_df['DayOfWeek'] = trades_df['Exit Time'].dt.day_name()
+
+        # Calculate metrics per day of week
+        daily_summary = trades_df.groupby('DayOfWeek').agg(
+            Total_PnL=('PnL', 'sum'),
+            Profitable_Trades=('Result', lambda x: (x == 'Profit').sum()),
+            Losing_Trades=('Result', lambda x: (x == 'Loss').sum()),
+            Timeout_Trades=('Result', lambda x: (x == 'Timeout').sum()),
+            Counter_Signal_Exits=('Result', lambda x: (x == 'Counter-Signal Exit').sum())
+        ).reset_index()
+
+        # Calculate Win Rate for each day
+        daily_summary['Total_Win_Loss_Trades'] = daily_summary['Profitable_Trades'] + daily_summary['Losing_Trades']
+        daily_summary['Win_Rate (%)'] = (daily_summary['Profitable_Trades'] / daily_summary['Total_Win_Loss_Trades']) * 100
+        daily_summary['Win_Rate (%)'] = daily_summary['Win_Rate (%)'].fillna(0).round(2) # Handle division by zero
+
+        # Order days of the week for consistent display
+        ordered_days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        daily_summary['DayOfWeek'] = pd.Categorical(daily_summary['DayOfWeek'], categories=ordered_days, ordered=True)
+        daily_summary = daily_summary.sort_values('DayOfWeek')
+
+        # Display table
+        st.dataframe(daily_summary.set_index('DayOfWeek'))
+
+        # Find day with highest win rate
+        if not daily_summary.empty:
+            # Filter out days with 0 total_win_loss_trades to avoid idxmax on all zeros
+            highest_win_rate_day_df = daily_summary[daily_summary['Total_Win_Loss_Trades'] > 0]
+            if not highest_win_rate_day_df.empty:
+                highest_win_rate_day = highest_win_rate_day_df.loc[highest_win_rate_day_df['Win_Rate (%)'].idxmax()]
+                st.info(f"**Day with Highest Win Rate:** {highest_win_rate_day['DayOfWeek']} with {highest_win_rate_day['Win_Rate (%)']:.2f}%")
+            else:
+                st.info("No days with winning or losing trades to determine highest win rate.")
+        else:
+            st.info("No daily performance data to analyze.")
