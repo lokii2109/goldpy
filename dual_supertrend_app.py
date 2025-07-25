@@ -1,50 +1,23 @@
 import sys
 import os
+import numpy as np # Import numpy early
 
-# --- START OF RUNTIME PATCH FOR PANDAS_TA ---
-# This section attempts to fix a common ImportError in pandas_ta with newer numpy versions
-# by dynamically patching the problematic line in its source code.
+# --- START OF PRE-IMPORT PATCH FOR PANDAS_TA / NUMPY ---
+# This section attempts to fix the ImportError by ensuring np.NaN exists before pandas_ta imports it.
 try:
-    # Construct the expected path to the problematic file
-    # This path is based on the traceback you provided from Streamlit Cloud
-    # /home/adminuser/venv/lib/python3.11/site-packages/pandas_ta/momentum/squeeze_pro.py
-    pandas_ta_path = None
-    for p in sys.path:
-        if "site-packages" in p and "venv" in p:
-            potential_path = os.path.join(p, 'pandas_ta', 'momentum', 'squeeze_pro.py')
-            if os.path.exists(potential_path):
-                pandas_ta_path = potential_path
-                break
-    
-    if pandas_ta_path:
-        with open(pandas_ta_path, 'r') as f:
-            lines = f.readlines()
-
-        modified = False
-        for i, line in enumerate(lines):
-            if "from numpy import NaN as npNaN" in line:
-                lines[i] = line.replace("from numpy import NaN as npNaN", "from numpy import nan as npNaN")
-                modified = True
-                break
-        
-        if modified:
-            with open(pandas_ta_path, 'w') as f:
-                f.writelines(lines)
-            print(f"Successfully patched {pandas_ta_path}")
-        else:
-            print(f"Patch not needed or line not found in {pandas_ta_path}")
+    if not hasattr(np, 'NaN'):
+        np.NaN = np.nan # Create an alias for np.nan as np.NaN
+        print("Successfully patched numpy.NaN alias.")
     else:
-        print("Could not locate squeeze_pro.py for patching.")
-
+        print("numpy.NaN already exists or patch not needed.")
 except Exception as e:
-    print(f"Error during pandas_ta runtime patch: {e}")
-# --- END OF RUNTIME PATCH FOR PANDAS_TA ---
+    print(f"Error during numpy.NaN pre-import patch: {e}")
+# --- END OF PRE-IMPORT PATCH FOR PANDAS_TA / NUMPY ---
 
 
 import yfinance as yf
 import pandas as pd
-import numpy as np
-import pandas_ta as ta  # For Supertrend calculation
+import pandas_ta as ta  # For Supertrend calculation (should now work)
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
