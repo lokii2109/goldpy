@@ -1,50 +1,65 @@
 import sys
-import os
+import os # Keep these imports as they were part of the previous attempt, though now less critical
 
-# --- START OF RUNTIME PATCH FOR PANDAS_TA ---
-# This section attempts to fix a common ImportError in pandas_ta with newer numpy versions
-# by dynamically patching the problematic line in its source code.
-# This patch is applied at runtime, before pandas_ta is imported.
-try:
-    # Construct the expected path to the problematic file within the virtual environment
-    # The path is derived from common Streamlit Cloud environment structures
-    pandas_ta_path = None
-    for p in sys.path:
-        # Look for 'site-packages' within a 'venv' directory
-        if "site-packages" in p and "venv" in p:
-            potential_path = os.path.join(p, 'pandas_ta', 'momentum', 'squeeze_pro.py')
-            if os.path.exists(potential_path):
-                pandas_ta_path = potential_path
-                break
+# --- Manual Supertrend Calculation Functions ---
+# Function to calculate Average True Range (ATR)
+def calculate_atr(df, length=14):
+    high_low = df['High'] - df['Low']
+    high_close = np.abs(df['High'] - df['Close'].shift())
+    low_close = np.abs(df['Low'] - df['Close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = np.max(ranges, axis=1)
+    atr = true_range.ewm(span=length, adjust=False).mean()
+    return atr
+
+# Function to calculate Supertrend
+def calculate_supertrend(df, length=7, multiplier=3.0):
+    atr = calculate_atr(df.copy(), length) # Pass a copy to avoid SettingWithCopyWarning
     
-    if pandas_ta_path:
-        with open(pandas_ta_path, 'r') as f:
-            lines = f.readlines()
+    # Basic Upper/Lower Band Calculation
+    basic_upper_band = ((df['High'] + df['Low']) / 2) + (multiplier * atr)
+    basic_lower_band = ((df['High'] + df['Low']) / 2) - (multiplier * atr)
 
-        modified = False
-        for i, line in enumerate(lines):
-            if "from numpy import NaN as npNaN" in line:
-                lines[i] = line.replace("from numpy import NaN as npNaN", "from numpy import nan as npNaN")
-                modified = True
-                break
-        
-        if modified:
-            with open(pandas_ta_path, 'w') as f:
-                f.writelines(lines)
-            print(f"Successfully patched {pandas_ta_path} at runtime.")
+    final_upper_band = pd.Series(index=df.index, dtype='float64')
+    final_lower_band = pd.Series(index=df.index, dtype='float64')
+    supertrend = pd.Series(index=df.index, dtype='float64')
+
+    # Initialize first values (handle potential NaNs from ATR calculation)
+    final_upper_band.iloc[length-1] = basic_upper_band.iloc[length-1]
+    final_lower_band.iloc[length-1] = basic_lower_band.iloc[length-1]
+    supertrend.iloc[length-1] = basic_upper_band.iloc[length-1] # Or basic_lower_band, initial state doesn't matter much here
+
+    for i in range(length, len(df)): # Start from 'length' to ensure ATR is calculated
+        # Final Upper Band
+        if basic_upper_band.iloc[i] < final_upper_band.iloc[i-1] or df['Close'].iloc[i-1] > final_upper_band.iloc[i-1]:
+            final_upper_band.iloc[i] = basic_upper_band.iloc[i]
         else:
-            print(f"Patch not needed or target line not found in {pandas_ta_path}. Already fixed?")
-    else:
-        print("Could not locate squeeze_pro.py for patching. Skipping patch.")
+            final_upper_band.iloc[i] = final_upper_band.iloc[i-1]
 
-except Exception as e:
-    print(f"Error during pandas_ta runtime patch: {e}")
-# --- END OF RUNTIME PATCH FOR PANDAS_TA ---
+        # Final Lower Band
+        if basic_lower_band.iloc[i] > final_lower_band.iloc[i-1] or df['Close'].iloc[i-1] < final_lower_band.iloc[i-1]:
+            final_lower_band.iloc[i] = basic_lower_band.iloc[i]
+        else:
+            final_lower_band.iloc[i] = final_lower_band.iloc[i-1]
+
+        # Supertrend
+        if supertrend.iloc[i-1] == final_upper_band.iloc[i-1] and df['Close'].iloc[i] < final_upper_band.iloc[i]:
+            supertrend.iloc[i] = final_upper_band.iloc[i]
+        elif supertrend.iloc[i-1] == final_lower_band.iloc[i-1] and df['Close'].iloc[i] > final_lower_band.iloc[i]:
+            supertrend.iloc[i] = final_lower_band.iloc[i]
+        elif df['Close'].iloc[i] > final_upper_band.iloc[i]:
+            supertrend.iloc[i] = final_lower_band.iloc[i]
+        elif df['Close'].iloc[i] < final_lower_band.iloc[i]:
+            supertrend.iloc[i] = final_upper_band.iloc[i]
+        else:
+            supertrend.iloc[i] = supertrend.iloc[i-1] # Maintain previous state if no clear crossover
+
+    return supertrend
 
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import pandas_ta as ta  # For Supertrend calculation
+# pandas_ta is REMOVED
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
@@ -126,24 +141,15 @@ if df_5m.empty or df_15m.empty:
     st.error("Error: DataFrames are empty after numeric conversion and NaN removal. Exiting.")
     st.stop()
 
-# --- Step 2: Compute Supertrend Indicator for both timeframes ---
-st.subheader("Supertrend Calculation")
+# --- Step 2: Compute Supertrend Indicator for both timeframes (MANUAL) ---
+st.subheader("Supertrend Calculation (Manual)")
 with st.spinner(f"Calculating Supertrend ({st_length},{st_multiplier}) for both timeframes..."):
     # 5-minute Supertrend
-    st_5m_data = ta.supertrend(df_5m['High'], df_5m['Low'], df_5m['Close'], length=st_length, multiplier=st_multiplier)
-    if st_5m_data is None or st_5m_data.empty:
-        st.error("Error: 5-minute Supertrend calculation failed. Exiting.")
-        st.stop()
-    df_5m[f'SUPERT_{st_length}_{st_multiplier}'] = st_5m_data[f'SUPERT_{st_length}_{st_multiplier}']
+    df_5m[f'SUPERT_{st_length}_{st_multiplier}'] = calculate_supertrend(df_5m.copy(), length=st_length, multiplier=st_multiplier)
     df_5m.dropna(subset=[f'SUPERT_{st_length}_{st_multiplier}'], inplace=True)
 
     # 15-minute Supertrend
-    st_15m_data = ta.supertrend(df_15m['High'], df_15m['Low'], df_15m['Close'], length=st_length,
-                                multiplier=st_multiplier)
-    if st_15m_data is None or st_15m_data.empty:
-        st.error("Error: 15-minute Supertrend calculation failed. Exiting.")
-        st.stop()
-    df_15m[f'SUPERT_{st_length}_{st_multiplier}'] = st_15m_data[f'SUPERT_{st_length}_{st_multiplier}']
+    df_15m[f'SUPERT_{st_length}_{st_multiplier}'] = calculate_supertrend(df_15m.copy(), length=st_length, multiplier=st_multiplier)
     df_15m.dropna(subset=[f'SUPERT_{st_length}_{st_multiplier}'], inplace=True)
 st.success("Supertrend calculations complete.")
 
