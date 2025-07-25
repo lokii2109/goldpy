@@ -1,3 +1,46 @@
+import sys
+import os
+
+# --- START OF RUNTIME PATCH FOR PANDAS_TA ---
+# This section attempts to fix a common ImportError in pandas_ta with newer numpy versions
+# by dynamically patching the problematic line in its source code.
+# This patch is applied at runtime, before pandas_ta is imported.
+try:
+    # Construct the expected path to the problematic file within the virtual environment
+    # The path is derived from common Streamlit Cloud environment structures
+    pandas_ta_path = None
+    for p in sys.path:
+        # Look for 'site-packages' within a 'venv' directory
+        if "site-packages" in p and "venv" in p:
+            potential_path = os.path.join(p, 'pandas_ta', 'momentum', 'squeeze_pro.py')
+            if os.path.exists(potential_path):
+                pandas_ta_path = potential_path
+                break
+    
+    if pandas_ta_path:
+        with open(pandas_ta_path, 'r') as f:
+            lines = f.readlines()
+
+        modified = False
+        for i, line in enumerate(lines):
+            if "from numpy import NaN as npNaN" in line:
+                lines[i] = line.replace("from numpy import NaN as npNaN", "from numpy import nan as npNaN")
+                modified = True
+                break
+        
+        if modified:
+            with open(pandas_ta_path, 'w') as f:
+                f.writelines(lines)
+            print(f"Successfully patched {pandas_ta_path} at runtime.")
+        else:
+            print(f"Patch not needed or target line not found in {pandas_ta_path}. Already fixed?")
+    else:
+        print("Could not locate squeeze_pro.py for patching. Skipping patch.")
+
+except Exception as e:
+    print(f"Error during pandas_ta runtime patch: {e}")
+# --- END OF RUNTIME PATCH FOR PANDAS_TA ---
+
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -108,7 +151,7 @@ st.success("Supertrend calculations complete.")
 st.subheader("Data Alignment")
 with st.spinner("Aligning 15-minute Supertrend to 5-minute timeframe..."):
     st_15m_resampled = df_15m[f'SUPERT_{st_length}_{st_multiplier}'].resample('5min').ffill()
-    df_5m = df_5m.merge(st_15m_resampled.rename(f'SUPERT_15m_{st_length}_{st_multiplier}'),
+    df_5m = df_5m.merge(st_15m_resampled.rename(f'SUPERT_15m_{st_length}_{st_multiplier}'), 
                         left_index=True, right_index=True, how='inner')
     df_5m.dropna(inplace=True)
 
@@ -309,17 +352,16 @@ else:
     st.subheader("Trade Outcome Distribution")
     outcome_counts = trades_df['Result'].value_counts().reset_index()
     outcome_counts.columns = ['Outcome', 'Count']
-    fig_outcome_pie = px.pie(outcome_counts,
-                             values='Count',
-                             names='Outcome',
+    fig_outcome_pie = px.pie(outcome_counts, 
+                             values='Count', 
+                             names='Outcome', 
                              title="Distribution of Trade Outcomes",
-                             color_discrete_map={'Profit': 'green', 'Loss': 'red', 'Counter-Signal Exit': 'orange',
-                                                 'Timeout': 'blue'})
+                             color_discrete_map={'Profit':'green', 'Loss':'red', 'Counter-Signal Exit':'orange', 'Timeout':'blue'})
     st.plotly_chart(fig_outcome_pie, use_container_width=True)
 
     # --- Cumulative PnL Chart ---
     trades_df['Cumulative PnL'] = trades_df['PnL'].cumsum()
-    fig_cumulative_pnl = px.line(trades_df, x='Exit Time', y='Cumulative PnL',
+    fig_cumulative_pnl = px.line(trades_df, x='Exit Time', y='Cumulative PnL', 
                                  title="Cumulative PnL Over Time",
                                  labels={'Cumulative PnL': 'Cumulative PnL (points)'})
     st.plotly_chart(fig_cumulative_pnl, use_container_width=True)
@@ -327,22 +369,22 @@ else:
     # --- Candlestick Chart with Supertrends ---
     st.subheader("Gold Price Candlestick Chart with Supertrends")
     fig_candlestick = go.Figure(data=[go.Candlestick(
-        x=df_5m.index,  # Use the Datetime index for x-axis
+        x=df_5m.index, # Use the Datetime index for x-axis
         open=df_5m['Open'],
         high=df_5m['High'],
         low=df_5m['Low'],
         close=df_5m['Close'],
         name='5m Candles'
     )])
-
+    
     # Add 5m Supertrend
-    fig_candlestick.add_trace(go.Scatter(x=df_5m.index, y=df_5m[f'SUPERT_{st_length}_{st_multiplier}'],
-                                         mode='lines', name=f'5m Supertrend ({st_length},{st_multiplier})',
+    fig_candlestick.add_trace(go.Scatter(x=df_5m.index, y=df_5m[f'SUPERT_{st_length}_{st_multiplier}'], 
+                                         mode='lines', name=f'5m Supertrend ({st_length},{st_multiplier})', 
                                          line=dict(color='blue', width=1.5)))
-
+    
     # Add 15m Supertrend (aligned to 5m timeframe)
-    fig_candlestick.add_trace(go.Scatter(x=df_5m.index, y=df_5m[f'SUPERT_15m_{st_length}_{st_multiplier}'],
-                                         mode='lines', name=f'15m Supertrend ({st_length},{st_multiplier})',
+    fig_candlestick.add_trace(go.Scatter(x=df_5m.index, y=df_5m[f'SUPERT_15m_{st_length}_{st_multiplier}'], 
+                                         mode='lines', name=f'15m Supertrend ({st_length},{st_multiplier})', 
                                          line=dict(color='purple', width=1.5, dash='dot')))
 
     fig_candlestick.update_layout(xaxis_rangeslider_visible=False, title="Gold Price (5-min Candles with Supertrends)")
@@ -393,5 +435,3 @@ else:
                 st.info("No days with winning or losing trades to determine highest win rate.")
         else:
             st.info("No daily performance data to analyze.")
-    else:
-        st.info("No trades to analyze for daily performance.")
