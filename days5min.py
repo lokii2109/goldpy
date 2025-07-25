@@ -25,9 +25,15 @@ def calculate_supertrend(df, length=7, multiplier=3.0):
     supertrend = pd.Series(index=df.index, dtype='float64')
 
     # Initialize first values (handle potential NaNs from ATR calculation)
-    final_upper_band.iloc[length-1] = basic_upper_band.iloc[length-1]
-    final_lower_band.iloc[length-1] = basic_lower_band.iloc[length-1]
-    supertrend.iloc[length-1] = basic_upper_band.iloc[length-1] # Or basic_lower_band, initial state doesn't matter much here
+    # Ensure there are enough data points for initialization, otherwise fill with NaN
+    if length > 0 and len(df) >= length:
+        final_upper_band.iloc[length-1] = basic_upper_band.iloc[length-1]
+        final_lower_band.iloc[length-1] = basic_lower_band.iloc[length-1]
+        supertrend.iloc[length-1] = basic_upper_band.iloc[length-1] # Or basic_lower_band, initial state doesn't matter much here
+    else:
+        # If not enough data, the series will remain NaN, and dropna will handle it later
+        pass
+
 
     for i in range(length, len(df)): # Start from 'length' to ensure ATR is calculated
         # Final Upper Band
@@ -59,7 +65,7 @@ def calculate_supertrend(df, length=7, multiplier=3.0):
 import yfinance as yf
 import pandas as pd
 import numpy as np
-# pandas_ta is REMOVED
+# pandas_ta is REMOVED - THIS LINE IS IMPORTANT!
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
@@ -145,10 +151,12 @@ if df_5m.empty or df_15m.empty:
 st.subheader("Supertrend Calculation (Manual)")
 with st.spinner(f"Calculating Supertrend ({st_length},{st_multiplier}) for both timeframes..."):
     # 5-minute Supertrend
+    # Call the manual calculate_supertrend function
     df_5m[f'SUPERT_{st_length}_{st_multiplier}'] = calculate_supertrend(df_5m.copy(), length=st_length, multiplier=st_multiplier)
     df_5m.dropna(subset=[f'SUPERT_{st_length}_{st_multiplier}'], inplace=True)
 
     # 15-minute Supertrend
+    # Call the manual calculate_supertrend function
     df_15m[f'SUPERT_{st_length}_{st_multiplier}'] = calculate_supertrend(df_15m.copy(), length=st_length, multiplier=st_multiplier)
     df_15m.dropna(subset=[f'SUPERT_{st_length}_{st_multiplier}'], inplace=True)
 st.success("Supertrend calculations complete.")
