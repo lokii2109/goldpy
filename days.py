@@ -5,23 +5,76 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 
-# --- START OF PRE-IMPORT PATCH FOR PANDAS_TA / NUMPY (if needed) ---
-# This section attempts to fix a common ImportError in pandas_ta with newer numpy versions
-# by dynamically patching the problematic line in its source code.
-# Remove this section if pandas_ta works without it after library updates.
-try:
-    import sys
-    import os
-    import numpy as np # Import numpy early for the patch
-    if not hasattr(np, 'NaN'):
-        np.NaN = np.nan # Create an alias for np.nan as np.NaN
-        # print("Successfully patched numpy.NaN alias.") # Debug print, remove for clean app
-except Exception as e:
-    # print(f"Error during numpy.NaN pre-import patch: {e}") # Debug print
-    pass # Suppress error if patch fails but pandas_ta might still work
-# --- END OF PRE-IMPORT PATCH FOR PANDAS_TA / NUMPY ---
+# --- Manual Supertrend Calculation Functions ---
+# Function to calculate Average True Range (ATR)
+def calculate_atr(df, length=14):
+    high_low = df['High'] - df['Low']
+    high_close = np.abs(df['High'] - df['Close'].shift())
+    low_close = np.abs(df['Low'] - df['Close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = np.max(ranges, axis=1)
+    atr = true_range.ewm(span=length, adjust=False).mean()
+    return atr
 
-import pandas_ta as ta # Import pandas_ta after potential patch
+# Function to calculate Supertrend
+def calculate_supertrend(df, length=7, multiplier=3.0):
+    # Ensure a copy is passed to avoid SettingWithCopyWarning if df is a slice
+    df_copy = df.copy() 
+    atr = calculate_atr(df_copy, length)
+    
+    # Basic Upper/Lower Band Calculation
+    basic_upper_band = ((df_copy['High'] + df_copy['Low']) / 2) + (multiplier * atr)
+    basic_lower_band = ((df_copy['High'] + df_copy['Low']) / 2) - (multiplier * atr)
+
+    final_upper_band = pd.Series(index=df_copy.index, dtype='float64')
+    final_lower_band = pd.Series(index=df_copy.index, dtype='float64')
+    supertrend = pd.Series(index=df_copy.index, dtype='float64')
+
+    # Initialize first values (handle potential NaNs from ATR calculation)
+    # Ensure there are enough data points for initialization, otherwise fill with NaN
+    # The first 'length' values of ATR will be NaN, so Supertrend starts after that.
+    # We initialize the first valid ATR value's corresponding Supertrend value.
+    first_valid_idx = atr.first_valid_index()
+    if first_valid_idx is not None:
+        first_valid_pos = df_copy.index.get_loc(first_valid_idx)
+        if first_valid_pos < len(df_copy):
+            final_upper_band.iloc[first_valid_pos] = basic_upper_band.iloc[first_valid_pos]
+            final_lower_band.iloc[first_valid_pos] = basic_lower_band.iloc[first_valid_pos]
+            supertrend.iloc[first_valid_pos] = basic_upper_band.iloc[first_valid_pos] # Initial state can be upper or lower
+    
+    for i in range(len(df_copy)): # Iterate through all indices
+        if i == 0 or pd.isna(supertrend.iloc[i-1]): # Handle initial NaN values or first valid entry
+            if not pd.isna(basic_upper_band.iloc[i]):
+                final_upper_band.iloc[i] = basic_upper_band.iloc[i]
+                final_lower_band.iloc[i] = basic_lower_band.iloc[i]
+                supertrend.iloc[i] = basic_upper_band.iloc[i] # Default initial state
+            continue # Skip to next iteration if still NaN or first candle
+
+        # Final Upper Band logic
+        if basic_upper_band.iloc[i] < final_upper_band.iloc[i-1] or df_copy['Close'].iloc[i-1] > final_upper_band.iloc[i-1]:
+            final_upper_band.iloc[i] = basic_upper_band.iloc[i]
+        else:
+            final_upper_band.iloc[i] = final_upper_band.iloc[i-1]
+
+        # Final Lower Band logic
+        if basic_lower_band.iloc[i] > final_lower_band.iloc[i-1] or df_copy['Close'].iloc[i-1] < final_lower_band.iloc[i-1]:
+            final_lower_band.iloc[i] = basic_lower_band.iloc[i]
+        else:
+            final_lower_band.iloc[i] = final_lower_band.iloc[i-1]
+
+        # Supertrend logic
+        if supertrend.iloc[i-1] == final_upper_band.iloc[i-1] and df_copy['Close'].iloc[i] < final_upper_band.iloc[i]:
+            supertrend.iloc[i] = final_upper_band.iloc[i]
+        elif supertrend.iloc[i-1] == final_lower_band.iloc[i-1] and df_copy['Close'].iloc[i] > final_lower_band.iloc[i]:
+            supertrend.iloc[i] = final_lower_band.iloc[i]
+        elif df_copy['Close'].iloc[i] > final_upper_band.iloc[i]:
+            supertrend.iloc[i] = final_lower_band.iloc[i]
+        elif df_copy['Close'].iloc[i] < final_lower_band.iloc[i]:
+            supertrend.iloc[i] = final_upper_band.iloc[i]
+        else:
+            supertrend.iloc[i] = supertrend.iloc[i-1] # Maintain previous state if no clear crossover
+
+    return supertrend
 
 # --- Streamlit App UI ---
 st.title("📈 Dual Supertrend Trading Strategy Backtester")
@@ -124,23 +177,17 @@ if df_primary.empty or df_secondary.empty:
     st.error("Error: DataFrames are empty after numeric conversion and NaN removal. Exiting.")
     st.stop()
 
-# --- Step 2: Compute Supertrend Indicator for both timeframes ---
-st.subheader("Supertrend Calculation")
+# --- Step 2: Compute Supertrend Indicator for both timeframes (MANUAL) ---
+st.subheader("Supertrend Calculation (Manual)")
 with st.spinner(f"Calculating Supertrend ({st_length},{st_multiplier}) for both timeframes..."):
     # Primary Timeframe Supertrend
-    st_primary_data = ta.supertrend(df_primary['High'], df_primary['Low'], df_primary['Close'], length=st_length, multiplier=st_multiplier)
-    if st_primary_data is None or st_primary_data.empty:
-        st.error(f"Error: {primary_interval} Supertrend calculation failed. Exiting.")
-        st.stop()
-    df_primary[f'SUPERT_{st_length}_{st_multiplier}'] = st_primary_data[f'SUPERT_{st_length}_{st_multiplier}']
+    # Call the manual calculate_supertrend function
+    df_primary[f'SUPERT_{st_length}_{st_multiplier}'] = calculate_supertrend(df_primary.copy(), length=st_length, multiplier=st_multiplier)
     df_primary.dropna(subset=[f'SUPERT_{st_length}_{st_multiplier}'], inplace=True)
 
     # Secondary Timeframe Supertrend
-    st_secondary_data = ta.supertrend(df_secondary['High'], df_secondary['Low'], df_secondary['Close'], length=st_length, multiplier=st_multiplier)
-    if st_secondary_data is None or st_secondary_data.empty:
-        st.error(f"Error: {secondary_interval} Supertrend calculation failed. Exiting.")
-        st.stop()
-    df_secondary[f'SUPERT_{st_length}_{st_multiplier}'] = st_secondary_data[f'SUPERT_{st_length}_{st_multiplier}']
+    # Call the manual calculate_supertrend function
+    df_secondary[f'SUPERT_{st_length}_{st_multiplier}'] = calculate_supertrend(df_secondary.copy(), length=st_length, multiplier=st_multiplier)
     df_secondary.dropna(subset=[f'SUPERT_{st_length}_{st_multiplier}'], inplace=True)
 st.success("Supertrend calculations complete.")
 
